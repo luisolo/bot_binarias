@@ -1,4 +1,4 @@
-pytelegrambotapi
-flask
-requests
-numpy
+pytelegrambotapi 
+flask 
+requests 
+numpy 

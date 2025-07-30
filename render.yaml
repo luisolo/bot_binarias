@@ -1,0 +1,5 @@
+envVars:
+  - key: TELEGRAM_TOKEN
+    value: ""
+  - key: DERIV_TOKEN
+    value: ""

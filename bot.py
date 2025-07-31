@@ -3,7 +3,7 @@ import telebot
 import schedule
 import time
 from datetime import datetime
-from deriv_api import DerivAPI  # Suponiendo que tienes un módulo para Deriv
+from deriv_api import DerivAPI
 import threading
 
 # Carga tokens desde variables de entorno
@@ -14,102 +14,95 @@ if not TELEGRAM_TOKEN or not DERIV_API_TOKEN:
     raise Exception("Por favor configura las variables de entorno TELEGRAM_BOT_TOKEN y DERIV_API_TOKEN")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+USER_ID = 1506143302  # Tu ID de Telegram para recibir los mensajes
 
-# Instancia para conectar con Deriv API (debes tener tu librería / código de conexión)
+# Instancia de conexión a Deriv
 deriv = DerivAPI(DERIV_API_TOKEN)
 
-USER_ID = 1506143302  # Tu ID de Telegram para enviar mensajes directos
+# ✅ Función para verificar el token Deriv
+def verificar_token_deriv():
+    try:
+        respuesta = deriv.send({"authorize": DERIV_API_TOKEN})
+        if "error" in respuesta:
+            print(f"[❌ DERIV] Token inválido: {respuesta['error']['message']}")
+            bot.send_message(USER_ID, f"❌ Token de Deriv inválido: {respuesta['error']['message']}")
+        else:
+            login_id = respuesta.get("authorize", {}).get("loginid", "Desconocido")
+            print(f"[✅ DERIV] Token válido. Usuario: {login_id}")
+            bot.send_message(USER_ID, f"✅ Token de Deriv válido. Usuario: {login_id}")
+    except Exception as e:
+        print(f"[⚠️ DERIV] Error de conexión: {e}")
+        bot.send_message(USER_ID, f"⚠️ Error al verificar token de Deriv: {e}")
 
-# Función para obtener datos reales del mercado desde Deriv (ejemplo básico)
+# Llamada inicial
+verificar_token_deriv()
+
+# 📊 Obtener datos de mercado
 def obtener_datos_mercado(par='frxEURUSD', intervalo='1m'):
-    # Esta función debe implementar la consulta real a Deriv y devolver datos útiles para análisis
     datos = deriv.get_candles(symbol=par, interval=intervalo, count=10)
     return datos
 
-# Función para crear señal de prueba (no válida para operar, solo demostración)
+# 📢 Señal de prueba
 def enviar_senal_prueba():
     ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    par = 'EUR/USD'
-    movimiento = 'Alcista'
-    sesion = 'Sesión Europea'
-    temporalidad = 'M1'
-    mensaje = (f"📢 *SEÑAL DE PRUEBA*\n"
-               f"Par: {par}\n"
-               f"Movimiento: {movimiento}\n"
-               f"Sesión: {sesion}\n"
-               f"Entrada recomendada a las: {ahora}\n"
-               f"Temporalidad: {temporalidad}\n"
-               f"Estado: Señal de prueba, no operar con esta señal.")
+    mensaje = (
+        f"📢 *SEÑAL DE PRUEBA*\n"
+        f"Par: EUR/USD\nMovimiento: Alcista\n"
+        f"Sesión: Sesión Europea\n"
+        f"Entrada recomendada a las: {ahora}\n"
+        f"Temporalidad: M1\n"
+        f"Estado: Señal de prueba, no operar con esta señal."
+    )
     bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
 
-# Función para detectar señales reales
+# ✅ Señales reales
 def detectar_senales_reales():
     datos = obtener_datos_mercado()
-    # Aquí se implementa la lógica real para detectar señales, ejemplo simple:
-    # Si última vela alcista con volumen alto => señal de compra
-    # Aquí solo un ejemplo básico:
     if datos and len(datos) > 1:
-        ultima_candle = datos[-1]
-        anterior_candle = datos[-2]
-        # Supongamos que detectamos una señal alcista si cierre > apertura anterior
-        if ultima_candle['close'] > anterior_candle['close']:
+        ultima = datos[-1]
+        anterior = datos[-2]
+        if ultima['close'] > anterior['close']:
             ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            par = 'EUR/USD'
-            movimiento = 'Alcista'
-            sesion = 'Sesión Europea'
-            temporalidad = 'M1'
-            entrada = ahora
-            # Envío de señal real
-            mensaje = (f"✅ *SEÑAL REAL DETECTADA*\n"
-                       f"Par: {par}\n"
-                       f"Movimiento: {movimiento}\n"
-                       f"Sesión: {sesion}\n"
-                       f"Entrada recomendada a las: {entrada}\n"
-                       f"Temporalidad: {temporalidad}\n"
-                       f"Estado: Señal real, evaluar para operar.")
+            mensaje = (
+                f"✅ *SEÑAL REAL DETECTADA*\n"
+                f"Par: EUR/USD\nMovimiento: Alcista\n"
+                f"Sesión: Sesión Europea\n"
+                f"Entrada recomendada a las: {ahora}\n"
+                f"Temporalidad: M1\n"
+                f"Estado: Señal real, evaluar para operar."
+            )
             bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
 
-# Función para enviar alerta previa de posible señal
+# ⚠️ Alerta previa
 def alerta_posible_senal():
-    # Ejemplo simple: si se detecta que la vela se acerca a nivel clave
-    posible = True  # Supón que aquí hay lógica para detectar
-    if posible:
-        ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        condicion = "Volumen creciente + Cierre cerca de resistencia"
-        mensaje = (f"⚠️ *ATENCIÓN: POSIBLE ENTRADA*\n"
-                   f"Condición a cumplirse: {condicion}\n"
-                   f"Hora estimada: {ahora}\n"
-                   f"Monitorear para confirmación.")
-        bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
+    ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    condicion = "Volumen creciente + Cierre cerca de resistencia"
+    mensaje = (
+        f"⚠️ *ATENCIÓN: POSIBLE ENTRADA*\n"
+        f"Condición a cumplirse: {condicion}\n"
+        f"Hora estimada: {ahora}\n"
+        f"Monitorear para confirmación."
+    )
+    bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
 
-# Job que envía señal de prueba inicial y luego cada 30 minutos
-def job_senal_prueba():
-    enviar_senal_prueba()
+# 🕒 Jobs programados
+schedule.every(30).minutes.do(enviar_senal_prueba)
+schedule.every(5).minutes.do(detectar_senales_reales)
+schedule.every(10).minutes.do(alerta_posible_senal)
+schedule.every().hour.do(verificar_token_deriv)  # Verificación cada hora
 
-def job_senales_reales():
-    detectar_senales_reales()
-
-def job_alerta_posible():
-    alerta_posible_senal()
-
-# Configuración de schedule
-schedule.every(30).minutes.do(job_senal_prueba)
-schedule.every(5).minutes.do(job_senales_reales)  # Ejemplo: checar señales reales cada 5 minutos
-schedule.every(10).minutes.do(job_alerta_posible) # Checar alertas previas cada 10 minutos
-
+# 🔁 Hilo para ejecutar programación
 def run_schedule():
-    # Enviar señal de prueba inicial al iniciar
     enviar_senal_prueba()
     while True:
         schedule.run_pending()
         time.sleep(1)
 
-# Ejecutar el scheduler en un hilo para no bloquear (opcional)
 threading.Thread(target=run_schedule, daemon=True).start()
 
-# Mantener el bot corriendo (puedes poner aquí lógica de bot Telegram si necesitas recibir comandos)
+# 🟢 Mantener el bot activo
 print("Bot activo y enviando señales...")
 
-# Mantener script activo
 while True:
     time.sleep(10)
+

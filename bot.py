@@ -2,101 +2,173 @@ import os
 import telebot
 import schedule
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
-import requests  # Para verificar el token de Deriv directamente
+import pandas as pd
+import numpy as np
+from ta.trend import EMAIndicator
+from ta.momentum import RSIIndicator
 
-from deriv_api import DerivAPI  # Asegúrate que tu módulo esté correctamente importado
+from deriv_api import DerivAPI  # Tu módulo para API Deriv
 
-# Carga tokens desde variables de entorno
+# --- Configuración tokens ---
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DERIV_API_TOKEN = os.getenv('DERIV_API_TOKEN')
 
 if not TELEGRAM_TOKEN or not DERIV_API_TOKEN:
-    raise Exception("Por favor configura las variables de entorno TELEGRAM_BOT_TOKEN y DERIV_API_TOKEN")
+    raise Exception("Configura las variables de entorno TELEGRAM_BOT_TOKEN y DERIV_API_TOKEN")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 deriv = DerivAPI(DERIV_API_TOKEN)
 
-USER_ID = 1506143302  # Tu ID de Telegram
+USER_ID = 1506143302
 
-# ✅ Verificar token Deriv
-def verificar_token_deriv():
+PARES_A_ANALIZAR = [
+    'frxEURUSD',  # EUR/USD
+    'frxUSDJPY',  # USD/JPY
+    'frxGBPUSD',  # GBP/USD
+    'frxAUDUSD'   # AUD/USD
+]
+
+# Para controlar señales enviadas pendientes de resultado
+señales_pendientes = []  # Lista de dicts: {'par':..., 'tipo_mov':..., 'hora_entrada': datetime}
+
+def obtener_datos_mercado(par='frxEURUSD', intervalo='1m', count=50):
     try:
-        response = requests.post(
-            "https://frontend.binaryws.com/websockets/v3",  # Endpoint público WebSocket API
-            json={"authorize": DERIV_API_TOKEN}
-        )
-        res_data = response.json()
-        if "error" in res_data:
-            bot.send_message(USER_ID, f"❌ Token inválido en Deriv: {res_data['error']['message']}")
-        else:
-            bot.send_message(USER_ID, "✅ Token de Deriv válido. Conexión exitosa.")
-    except Exception as e:
-        bot.send_message(USER_ID, f"❌ Error al verificar token de Deriv: {str(e)}")
-
-verificar_token_deriv()
-
-# 📈 Obtener datos del mercado
-def obtener_datos_mercado(par='frxEURUSD', intervalo='1m'):
-    try:
-        datos = deriv.get_candles(symbol=par, interval=intervalo, count=10)
+        datos = deriv.get_candles(symbol=par, interval=intervalo, count=count)
         return datos
     except Exception as e:
-        print("Error al obtener datos del mercado:", e)
+        print(f"Error al obtener datos del mercado para {par}: {e}")
         return []
 
-# 📢 Señal de prueba
-def enviar_senal_prueba():
-    ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    par = 'EUR/USD'
-    movimiento = 'Alcista'
-    sesion = 'Sesión Europea'
-    temporalidad = 'M1'
-    mensaje = (f"📢 *SEÑAL DE PRUEBA*\n"
-               f"Par: {par}\n"
-               f"Movimiento: {movimiento}\n"
-               f"Sesión: {sesion}\n"
-               f"Entrada recomendada a las: {ahora}\n"
-               f"Temporalidad: {temporalidad}\n"
-               f"Estado: Señal de prueba, no operar con esta señal.")
+def calcular_indicadores(df):
+    df['ema20'] = EMAIndicator(df['close'], window=20).ema_indicator()
+    df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
+    return df
+
+def evaluar_condiciones(df):
+    if len(df) < 20:
+        return False, ""
+
+    df = calcular_indicadores(df)
+
+    close_actual = df['close'].iloc[-1]
+    ema20_actual = df['ema20'].iloc[-1]
+    rsi_actual = df['rsi'].iloc[-1]
+
+    condiciones_cumplidas = 0
+
+    if close_actual > ema20_actual:
+        tendencia = 'alcista'
+        condiciones_cumplidas += 1
+    else:
+        tendencia = 'bajista'
+        condiciones_cumplidas += 1
+
+    if tendencia == 'alcista' and rsi_actual < 70:
+        condiciones_cumplidas += 1
+    elif tendencia == 'bajista' and rsi_actual > 30:
+        condiciones_cumplidas += 1
+
+    vela_actual_alcista = df['close'].iloc[-1] > df['open'].iloc[-1]
+    vela_actual_bajista = df['close'].iloc[-1] < df['open'].iloc[-1]
+    if (tendencia == 'alcista' and vela_actual_alcista) or (tendencia == 'bajista' and vela_actual_bajista):
+        condiciones_cumplidas += 1
+
+    if condiciones_cumplidas >= 3:
+        return True, tendencia
+    else:
+        return False, tendencia
+
+def enviar_senal(par, tipo_mov, hora):
+    par_readable = par.replace('frx', '').replace('fr', '') 
+    mensaje = (
+        f"✅ *SEÑAL REAL*\n"
+        f"Par: {par_readable}\n"
+        f"Movimiento: {tipo_mov}\n"
+        f"Hora entrada: {hora}\n"
+        f"Temporalidad: M1\n"
+        f"¡Evalúa y opera con precaución!"
+    )
     bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
 
-# ✅ Detección de señales reales
+    # Registrar señal pendiente para revisión posterior
+    señales_pendientes.append({
+        'par': par,
+        'tipo_mov': tipo_mov,
+        'hora_entrada': datetime.strptime(hora, '%Y-%m-%d %H:%M:%S')
+    })
+
+def enviar_resultado(señal, resultado):
+    par_readable = señal['par'].replace('frx', '').replace('fr', '') 
+    mensaje = (
+        f"📊 *RESULTADO DE SEÑAL*\n"
+        f"Par: {par_readable}\n"
+        f"Movimiento: {señal['tipo_mov']}\n"
+        f"Hora entrada: {señal['hora_entrada'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Resultado: *{resultado}*\n"
+    )
+    bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
+
+def enviar_senal_prueba():
+    ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    mensaje = f"📢 *SEÑAL DE PRUEBA* - Bot activo a las {ahora}"
+    bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
+
 def detectar_senales_reales():
-    datos = obtener_datos_mercado()
-    if datos and len(datos) > 1:
-        ultima_candle = datos[-1]
-        anterior_candle = datos[-2]
-        if ultima_candle['close'] > anterior_candle['close']:
-            ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            mensaje = (f"✅ *SEÑAL REAL DETECTADA*\n"
-                       f"Par: EUR/USD\n"
-                       f"Movimiento: Alcista\n"
-                       f"Sesión: Sesión Europea\n"
-                       f"Entrada recomendada a las: {ahora}\n"
-                       f"Temporalidad: M1\n"
-                       f"Estado: Señal real, evaluar para operar.")
-            bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
+    for par in PARES_A_ANALIZAR:
+        datos = obtener_datos_mercado(par=par)
+        if not datos:
+            print(f"No hay datos para analizar {par}")
+            continue
+        df = pd.DataFrame(datos)
+        signal, tendencia = evaluar_condiciones(df)
+        if signal:
+            hora_entrada = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            tipo_mov = "CALL" if tendencia == 'alcista' else "PUT"
+            enviar_senal(par, tipo_mov, hora_entrada)
+        else:
+            print(f"No se cumplen condiciones para señal real en {par}")
 
-# ⚠️ Alerta previa de posible señal
-def alerta_posible_senal():
-    posible = True  # Aquí va la lógica real
-    if posible:
-        ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        condicion = "Volumen creciente + Cierre cerca de resistencia"
-        mensaje = (f"⚠️ *ATENCIÓN: POSIBLE ENTRADA*\n"
-                   f"Condición a cumplirse: {condicion}\n"
-                   f"Hora estimada: {ahora}\n"
-                   f"Monitorear para confirmación.")
-        bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
+def revisar_resultados():
+    # Revisa señales enviadas hace al menos 1 vela (1 min)
+    ahora = datetime.now()
+    señales_a_revisar = []
 
-# ⏱️ Programación de tareas
+    for señal in señales_pendientes:
+        if ahora >= señal['hora_entrada'] + timedelta(minutes=1):
+            señales_a_revisar.append(señal)
+
+    for señal in señales_a_revisar:
+        datos = obtener_datos_mercado(par=señal['par'], count=2)
+        if not datos or len(datos) < 2:
+            print(f"No hay datos suficientes para revisar resultado {señal['par']}")
+            continue
+
+        df = pd.DataFrame(datos)
+        vela_entrada = df.iloc[-2]  # vela de entrada
+        vela_siguiente = df.iloc[-1]  # vela posterior para resultado
+
+        resultado = None
+        if señal['tipo_mov'] == "CALL":
+            if vela_siguiente['close'] > vela_entrada['close']:
+                resultado = "GANADA 🎉"
+            else:
+                resultado = "PERDIDA ❌"
+        else:  # PUT
+            if vela_siguiente['close'] < vela_entrada['close']:
+                resultado = "GANADA 🎉"
+            else:
+                resultado = "PERDIDA ❌"
+
+        enviar_resultado(señal, resultado)
+        señales_pendientes.remove(señal)
+
+# --- Schedule ---
 schedule.every(30).minutes.do(enviar_senal_prueba)
 schedule.every(5).minutes.do(detectar_senales_reales)
-schedule.every(10).minutes.do(alerta_posible_senal)
+schedule.every(1).minutes.do(revisar_resultados)  # Revisar resultados cada minuto
 
-# 🧵 Hilo para ejecutar tareas
 def run_schedule():
     enviar_senal_prueba()
     while True:
@@ -105,10 +177,10 @@ def run_schedule():
 
 threading.Thread(target=run_schedule, daemon=True).start()
 
-# 🟢 Mantener bot activo
-print("Bot activo y enviando señales...")
+print("Bot activo y enviando señales con reporte de resultados...")
 
 while True:
     time.sleep(10)
+
 
 

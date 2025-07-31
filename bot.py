@@ -3,8 +3,10 @@ import telebot
 import schedule
 import time
 from datetime import datetime
-from deriv_api import DerivAPI
 import threading
+import requests  # Para verificar el token de Deriv directamente
+
+from deriv_api import DerivAPI  # Asegúrate que tu módulo esté correctamente importado
 
 # Carga tokens desde variables de entorno
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -14,84 +16,87 @@ if not TELEGRAM_TOKEN or not DERIV_API_TOKEN:
     raise Exception("Por favor configura las variables de entorno TELEGRAM_BOT_TOKEN y DERIV_API_TOKEN")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-USER_ID = 1506143302  # Tu ID de Telegram para recibir los mensajes
-
-# Instancia de conexión a Deriv
 deriv = DerivAPI(DERIV_API_TOKEN)
 
-# ✅ Función para verificar el token Deriv
+USER_ID = 1506143302  # Tu ID de Telegram
+
+# ✅ Verificar token Deriv
 def verificar_token_deriv():
     try:
-        respuesta = deriv.send({"authorize": DERIV_API_TOKEN})
-        if "error" in respuesta:
-            print(f"[❌ DERIV] Token inválido: {respuesta['error']['message']}")
-            bot.send_message(USER_ID, f"❌ Token de Deriv inválido: {respuesta['error']['message']}")
+        response = requests.post(
+            "https://frontend.binaryws.com/websockets/v3",  # Endpoint público WebSocket API
+            json={"authorize": DERIV_API_TOKEN}
+        )
+        res_data = response.json()
+        if "error" in res_data:
+            bot.send_message(USER_ID, f"❌ Token inválido en Deriv: {res_data['error']['message']}")
         else:
-            login_id = respuesta.get("authorize", {}).get("loginid", "Desconocido")
-            print(f"[✅ DERIV] Token válido. Usuario: {login_id}")
-            bot.send_message(USER_ID, f"✅ Token de Deriv válido. Usuario: {login_id}")
+            bot.send_message(USER_ID, "✅ Token de Deriv válido. Conexión exitosa.")
     except Exception as e:
-        print(f"[⚠️ DERIV] Error de conexión: {e}")
-        bot.send_message(USER_ID, f"⚠️ Error al verificar token de Deriv: {e}")
+        bot.send_message(USER_ID, f"❌ Error al verificar token de Deriv: {str(e)}")
 
-# Llamada inicial
 verificar_token_deriv()
 
-# 📊 Obtener datos de mercado
+# 📈 Obtener datos del mercado
 def obtener_datos_mercado(par='frxEURUSD', intervalo='1m'):
-    datos = deriv.get_candles(symbol=par, interval=intervalo, count=10)
-    return datos
+    try:
+        datos = deriv.get_candles(symbol=par, interval=intervalo, count=10)
+        return datos
+    except Exception as e:
+        print("Error al obtener datos del mercado:", e)
+        return []
 
 # 📢 Señal de prueba
 def enviar_senal_prueba():
     ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    mensaje = (
-        f"📢 *SEÑAL DE PRUEBA*\n"
-        f"Par: EUR/USD\nMovimiento: Alcista\n"
-        f"Sesión: Sesión Europea\n"
-        f"Entrada recomendada a las: {ahora}\n"
-        f"Temporalidad: M1\n"
-        f"Estado: Señal de prueba, no operar con esta señal."
-    )
+    par = 'EUR/USD'
+    movimiento = 'Alcista'
+    sesion = 'Sesión Europea'
+    temporalidad = 'M1'
+    mensaje = (f"📢 *SEÑAL DE PRUEBA*\n"
+               f"Par: {par}\n"
+               f"Movimiento: {movimiento}\n"
+               f"Sesión: {sesion}\n"
+               f"Entrada recomendada a las: {ahora}\n"
+               f"Temporalidad: {temporalidad}\n"
+               f"Estado: Señal de prueba, no operar con esta señal.")
     bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
 
-# ✅ Señales reales
+# ✅ Detección de señales reales
 def detectar_senales_reales():
     datos = obtener_datos_mercado()
     if datos and len(datos) > 1:
-        ultima = datos[-1]
-        anterior = datos[-2]
-        if ultima['close'] > anterior['close']:
+        ultima_candle = datos[-1]
+        anterior_candle = datos[-2]
+        if ultima_candle['close'] > anterior_candle['close']:
             ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            mensaje = (
-                f"✅ *SEÑAL REAL DETECTADA*\n"
-                f"Par: EUR/USD\nMovimiento: Alcista\n"
-                f"Sesión: Sesión Europea\n"
-                f"Entrada recomendada a las: {ahora}\n"
-                f"Temporalidad: M1\n"
-                f"Estado: Señal real, evaluar para operar."
-            )
+            mensaje = (f"✅ *SEÑAL REAL DETECTADA*\n"
+                       f"Par: EUR/USD\n"
+                       f"Movimiento: Alcista\n"
+                       f"Sesión: Sesión Europea\n"
+                       f"Entrada recomendada a las: {ahora}\n"
+                       f"Temporalidad: M1\n"
+                       f"Estado: Señal real, evaluar para operar.")
             bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
 
-# ⚠️ Alerta previa
+# ⚠️ Alerta previa de posible señal
 def alerta_posible_senal():
-    ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    condicion = "Volumen creciente + Cierre cerca de resistencia"
-    mensaje = (
-        f"⚠️ *ATENCIÓN: POSIBLE ENTRADA*\n"
-        f"Condición a cumplirse: {condicion}\n"
-        f"Hora estimada: {ahora}\n"
-        f"Monitorear para confirmación."
-    )
-    bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
+    posible = True  # Aquí va la lógica real
+    if posible:
+        ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        condicion = "Volumen creciente + Cierre cerca de resistencia"
+        mensaje = (f"⚠️ *ATENCIÓN: POSIBLE ENTRADA*\n"
+                   f"Condición a cumplirse: {condicion}\n"
+                   f"Hora estimada: {ahora}\n"
+                   f"Monitorear para confirmación.")
+        bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
 
-# 🕒 Jobs programados
+# ⏱️ Programación de tareas
 schedule.every(30).minutes.do(enviar_senal_prueba)
 schedule.every(5).minutes.do(detectar_senales_reales)
 schedule.every(10).minutes.do(alerta_posible_senal)
-schedule.every().hour.do(verificar_token_deriv)  # Verificación cada hora
 
-# 🔁 Hilo para ejecutar programación
+# 🧵 Hilo para ejecutar tareas
 def run_schedule():
     enviar_senal_prueba()
     while True:
@@ -100,9 +105,10 @@ def run_schedule():
 
 threading.Thread(target=run_schedule, daemon=True).start()
 
-# 🟢 Mantener el bot activo
+# 🟢 Mantener bot activo
 print("Bot activo y enviando señales...")
 
 while True:
     time.sleep(10)
+
 

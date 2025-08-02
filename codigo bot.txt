@@ -1,0 +1,337 @@
+import asyncio
+import websockets
+import json
+from datetime import datetime, timedelta
+import pytz
+from telegram import Bot
+import traceback
+import time
+
+# --- Configuración ---
+TOKEN_DERIV = "xOJbxBMzWZZKWOS"
+APP_ID = "1089"
+ID_TELEGRAM = 1506143302
+TELEGRAM_BOT_TOKEN = "7905520008:AAG6stSt0gPK33MUyiVZ5yeaSlKYY_CYvJU"
+
+bot_telegram = Bot(token=TELEGRAM_BOT_TOKEN)
+zona_horaria_mexico = pytz.timezone('America/Mexico_City')
+
+pares_favoritos = ["frxUSDJPY", "frxEURUSD", "frxGBPUSD", "frxUSDCHF"]
+
+TEMPORALIDADES = {
+    "M1": 60,
+    "M5": 300
+}
+
+señales_confirmadas = {}
+contratos_activos = {}  # contract_id -> info de la señal para seguimiento
+
+# --- Funciones de Estrategia Sarah (simplificadas, reemplazar con lógica real) ---
+def estructura_tendencia(data): 
+    # Aquí implementar la lógica real
+    return True
+
+def soporte_resistencia(data): 
+    # Aquí implementar la lógica real
+    return True
+
+def patrones_velas(data): 
+    # Aquí implementar la lógica real
+    return True
+
+def alineacion_ema(data): 
+    # Aquí implementar la lógica real
+    return True
+
+def confirmacion_rsi(data): 
+    # Aquí implementar la lógica real
+    return True
+
+def volumen_activo(data): 
+    # Aquí implementar la lógica real
+    return True
+
+def validar_condiciones(datos):
+    condiciones = [
+        estructura_tendencia(datos),
+        soporte_resistencia(datos),
+        patrones_velas(datos),
+        alineacion_ema(datos),
+        confirmacion_rsi(datos),
+        volumen_activo(datos),
+    ]
+    return condiciones.count(True) >= 4, condiciones
+
+# --- Utilidades de horario ---
+def obtener_sesion_actual():
+    ahora = datetime.now(zona_horaria_mexico).time()
+    if 7 <= ahora.hour < 15:
+        return "Sesión América"
+    elif 15 <= ahora.hour < 22:
+        return "Sesión Europa"
+    else:
+        return "Sesión Asia"
+
+def es_horario_operativo():
+    ahora = datetime.now(zona_horaria_mexico).time()
+    return 8 <= ahora.hour < 22
+
+# --- Envío Telegram ---
+async def enviar_mensaje_telegram(texto):
+    try:
+        await bot_telegram.send_message(chat_id=ID_TELEGRAM, text=texto)
+        print(f"Mensaje enviado:\n{texto}")
+    except Exception as e:
+        print(f"Error enviando Telegram: {e}")
+
+# --- Obtener datos históricos de velas ---
+async def obtener_datos_velas(ws, symbol, granularity):
+    try:
+        solicitud = {
+            "ticks_history": symbol,
+            "adjust_start_time": 1,
+            "count": 20,
+            "end": "latest",
+            "start": 1,
+            "style": "candles",
+            "granularity": granularity
+        }
+        await ws.send(json.dumps(solicitud))
+        respuesta = await ws.recv()
+        return json.loads(respuesta)
+    except Exception as e:
+        print(f"Error obteniendo velas para {symbol} en {granularity}s: {e}")
+        return None
+
+# --- Obtener tick (precio institucional) ---
+async def obtener_precio_tick(ws, symbol, timeout=5):
+    try:
+        solicitud_subscribe = {
+            "ticks": symbol,
+            "subscribe": 1
+        }
+        await ws.send(json.dumps(solicitud_subscribe))
+
+        start_time = asyncio.get_event_loop().time()
+
+        while True:
+            if asyncio.get_event_loop().time() - start_time > timeout:
+                print(f"Timeout al obtener tick para {symbol}")
+                return None
+            respuesta = await ws.recv()
+            data = json.loads(respuesta)
+            if "tick" in data:
+                subscription_id = data.get("subscription", {}).get("id")
+                if subscription_id:
+                    solicitud_unsubscribe = {
+                        "forget": subscription_id
+                    }
+                    await ws.send(json.dumps(solicitud_unsubscribe))
+                return data["tick"]
+            await asyncio.sleep(0.1)
+    except Exception as e:
+        print(f"Error obteniendo tick para {symbol}: {e}")
+        return None
+
+# --- Enviar señal confirmada con precio, hora o siguiente vela ---
+async def enviar_senal_confirmada(ws, par, tipo, sesion, temporalidad):
+    tick = await obtener_precio_tick(ws, par)
+    if tick:
+        precio_institucional = tick["ask"] if tipo.upper() == "ALCISTA" else tick["bid"]
+        hora_entrada = datetime.fromtimestamp(tick["epoch"], zona_horaria_mexico).strftime("%H:%M:%S")
+        # Aquí decidir si mejor es precio institucional, hora o siguiente vela (ejemplo: tomamos precio y hora)
+        modo_entrada = "Precio institucional y hora"
+    else:
+        precio_institucional = "No disponible"
+        hora_entrada = "No disponible"
+        modo_entrada = "No disponible"
+
+    texto = (
+        f"✅ ENTRADA CONFIRMADA\n"
+        f"Par: {par}\n"
+        f"Tipo de entrada: {tipo}\n"
+        f"Sesión actual: {sesion}\n"
+        f"Temporalidad para entrada: {temporalidad}\n"
+        f"Modo de entrada: {modo_entrada}\n"
+        f"Precio institucional: {precio_institucional}\n"
+        f"Hora de entrada: {hora_entrada}"
+    )
+    await enviar_mensaje_telegram(texto)
+
+# --- Comprar contrato y guardar contract_id para monitoreo ---
+async def comprar_contrato(ws, par, tipo, sesion, temporalidad):
+    contrato_params = {
+        "buy": 1,
+        "parameters": {
+            "amount": 1,
+            "basis": "stake",
+            "contract_type": "CALL" if tipo == "ALCISTA" else "PUT",
+            "currency": "USD",
+            "duration": TEMPORALIDADES[temporalidad],
+            "duration_unit": "s",
+            "symbol": par,
+            "subscribe": 1
+        }
+    }
+    await ws.send(json.dumps(contrato_params))
+    respuesta = await ws.recv()
+    data = json.loads(respuesta)
+    if "error" in data:
+        await enviar_mensaje_telegram(f"❌ Error al comprar contrato: {data['error']['message']}")
+        return None
+    contract_id = data.get("buy", {}).get("contract_id")
+    if contract_id:
+        contratos_activos[contract_id] = {
+            "par": par,
+            "tipo": tipo,
+            "sesion": sesion,
+            "temporalidad": temporalidad,
+            "timestamp": datetime.now(zona_horaria_mexico)
+        }
+        await enviar_mensaje_telegram(f"🟢 Contrato comprado, contract_id: {contract_id}")
+        return contract_id
+    else:
+        await enviar_mensaje_telegram("❌ No se recibió contract_id al comprar")
+        return None
+
+# --- Analizar temporalidades (m1 y m5) ---
+async def analizar_temporalidades(ws, par):
+    señales_temporalidad = {}
+    for nombre_temp, gran in TEMPORALIDADES.items():
+        datos = await obtener_datos_velas(ws, par, gran)
+        if datos:
+            valido, condiciones = validar_condiciones(datos)
+            # Mostrar estado de condiciones en consola para debug
+            condiciones_texto = [
+                f"Tendencia: {'Sí' if condiciones[0] else 'NO'}",
+                f"Soporte/Resistencia: {'Sí' if condiciones[1] else 'NO'}",
+                f"Patrón vela: {'Sí' if condiciones[2] else 'NO'}",
+                f"EMA: {'Sí' if condiciones[3] else 'NO'}",
+                f"RSI: {'Sí' if condiciones[4] else 'NO'}",
+                f"Volumen: {'Sí' if condiciones[5] else 'NO'}",
+            ]
+            print(f"Condiciones para {par} en {nombre_temp}: {condiciones_texto}")
+            señales_temporalidad[nombre_temp] = valido
+        else:
+            señales_temporalidad[nombre_temp] = False
+    return señales_temporalidad
+
+# --- Función principal que maneja la conexión y análisis ---
+async def manejar_ws(ws):
+    # Lanzar monitoreo resultados solo una vez
+    asyncio.create_task(monitorear_resultados(ws))
+    
+    while True:
+        try:
+            for par in pares_favoritos:
+                if not es_horario_operativo():
+                    continue
+
+                ahora = datetime.now(zona_horaria_mexico)
+                if par in señales_confirmadas:
+                    tiempo_ultima_senal = señales_confirmadas[par]
+                    if ahora - tiempo_ultima_senal < timedelta(minutes=30):
+                        continue
+
+                resultados = await analizar_temporalidades(ws, par)
+                temporalidades_validas = [t for t, valido in resultados.items() if valido]
+
+                if temporalidades_validas:
+                    temp_operar = "M5" if "M5" in temporalidades_validas else temporalidades_validas[0]
+                    sesion = obtener_sesion_actual()
+                    tipo_entrada = "ALCISTA"  # Aquí debes mejorar la lógica según análisis real
+
+                    # Enviar alerta previa
+                    texto_alerta = (
+                        f"⚠️ ALERTA PREVIA DE ENTRADA\n"
+                        f"Par: {par}\n"
+                        f"Tipo: {tipo_entrada}\n"
+                        f"Sesión: {sesion}\n"
+                        f"Temporalidad: {temp_operar}\n"
+                        f"Esperando confirmación..."
+                    )
+                    await enviar_mensaje_telegram(texto_alerta)
+
+                    # Confirmar entrada y comprar contrato
+                    await enviar_senal_confirmada(ws, par, tipo_entrada, sesion, temp_operar)
+                    contract_id = await comprar_contrato(ws, par, tipo_entrada, sesion, temp_operar)
+                    if contract_id:
+                        señales_confirmadas[par] = ahora
+                else:
+                    if par in señales_confirmadas:
+                        texto_descartada = (
+                            f"❌ SEÑAL DESCARTADA\n"
+                            f"Par: {par}\n"
+                            f"Motivo: No se cumplieron las condiciones necesarias."
+                        )
+                        await enviar_mensaje_telegram(texto_descartada)
+                        del señales_confirmadas[par]
+
+            await asyncio.sleep(30)
+        except Exception as e:
+            print(f"Error en manejo WS: {e}")
+            traceback.print_exc()
+            await asyncio.sleep(5)
+
+# --- Monitorear resultados reales de contratos ---
+async def monitorear_resultados(ws):
+    try:
+        while True:
+            if contratos_activos:
+                # Suscribir a los contratos activos para recibir actualizaciones
+                for contract_id in list(contratos_activos.keys()):
+                    await ws.send(json.dumps({
+                        "proposal_open_contract": 1,
+                        "contract_id": contract_id,
+                        "subscribe": 1
+                    }))
+            respuesta = await ws.recv()
+            data = json.loads(respuesta)
+            if "proposal_open_contract" in data:
+                contract_info = data["proposal_open_contract"]
+                contract_id = contract_info.get("contract_id")
+                status = contract_info.get("status")
+                profit = contract_info.get("profit")
+                if contract_id in contratos_activos:
+                    info = contratos_activos[contract_id]
+                    par = info["par"]
+                    tipo = info["tipo"]
+                    if status == "closed":
+                        resultado = "GANADA" if profit and profit > 0 else "PERDIDA"
+                        texto_resultado = (
+                            f"🎯 RESULTADO CONTRATO\n"
+                            f"Par: {par}\n"
+                            f"Tipo: {tipo}\n"
+                            f"Resultado: {resultado}\n"
+                            f"Ganancia/Pérdida: {profit}"
+                        )
+                        await enviar_mensaje_telegram(texto_resultado)
+                        del contratos_activos[contract_id]
+            await asyncio.sleep(0.1)
+    except Exception as e:
+        print(f"Error monitoreando resultados: {e}")
+        traceback.print_exc()
+        await asyncio.sleep(5)
+
+# --- Conexión principal con Deriv ---
+async def conectar_deriv():
+    while True:
+        try:
+            async with websockets.connect(f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}") as ws:
+                print("Conectado a Deriv")
+                await ws.send(json.dumps({"authorize": TOKEN_DERIV}))
+                respuesta_auth = await ws.recv()
+                auth_data = json.loads(respuesta_auth)
+                if auth_data.get("error"):
+                    print(f"Error autenticando: {auth_data['error']['message']}")
+                    await asyncio.sleep(10)
+                    continue
+                await manejar_ws(ws)
+        except Exception as e:
+            print(f"Conexión perdida, reintentando: {e}")
+            traceback.print_exc()
+            await asyncio.sleep(5)
+
+# --- Main ---
+if __name__ == "__main__":
+    asyncio.run(conectar_deriv())

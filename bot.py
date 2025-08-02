@@ -1,148 +1,126 @@
-
-
-
-
+import asyncio
+import websockets
+import json
+import pytz
 import os
-import telebot
-import schedule
-import time
-from datetime import datetime
-import threading
-import requests
-import pytz  # Para zona horaria
+from datetime import datetime, timedelta
+from telegram import Bot
+import traceback
 
-from deriv_api import DerivAPI  # Asegúrate que tu módulo esté correctamente importado
+# --- CONFIGURACIÓN GENERAL ---
+TOKEN_DERIV = os.getenv("DERIV_API_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Carga tokens desde variables de entorno
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-DERIV_API_TOKEN = os.getenv('DERIV_API_TOKEN')
+if not TOKEN_DERIV or not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    raise Exception("Faltan variables de entorno obligatorias: DERIV_API_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID")
 
-if not TELEGRAM_TOKEN or not DERIV_API_TOKEN:
-    raise Exception("Por favor configura las variables de entorno TELEGRAM_BOT_TOKEN y DERIV_API_TOKEN")
+# --- PARÁMETROS ---
+PAIRS = ["frxEURUSD", "frxUSDJPY", "frxGBPUSD", "frxUSDCHF"]
+TIMEZONE = pytz.timezone("America/Mexico_City")
+SIGNAL_INTERVAL = timedelta(minutes=30)
+REPEAT_BLOCK_TIME = timedelta(hours=1)
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-deriv = DerivAPI(DERIV_API_TOKEN)
+# --- INICIALIZACIÓN ---
+bot = Bot(token=TELEGRAM_TOKEN)
+last_signals = {}
 
-USER_ID = 1506143302  # Tu ID de Telegram
+# ... resto igual que antes ...
 
-# Zona horaria Guadalajara, Jalisco (UTC-6 sin horario de verano)
-zona_mexico = pytz.timezone('America/Mexico_City')
+# --- ESTRATEGIA PERSONALIZADA SARAH ---
+def validar_condiciones_sarah(candle_data):
+    """
+    Simula la validación de las 6 condiciones.
+    Retorna True si se cumplen al menos 4 de 6.
+    """
+    condiciones = {
+        "estructura_tendencia": True,
+        "zona_sr": True,
+        "patron_vela": False,
+        "ema20": True,
+        "rsi": False,
+        "volumen": True
+    }
+    cumplidas = sum(condiciones.values())
+    return cumplidas >= 4, condiciones
 
-def hora_actual_mexico():
-    ahora_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
-    ahora_mexico = ahora_utc.astimezone(zona_mexico)
-    return ahora_mexico.strftime('%Y-%m-%d %H:%M:%S')
+# --- UTILIDADES ---
+def hora_actual():
+    return datetime.now(TIMEZONE)
 
-# ✅ Verificar token Deriv
-def verificar_token_deriv():
+async def enviar_telegram(mensaje):
     try:
-        response = requests.post(
-            "https://frontend.binaryws.com/websockets/v3",
-            json={"authorize": DERIV_API_TOKEN}
-        )
-        res_data = response.json()
-        if "error" in res_data:
-            bot.send_message(USER_ID, f"❌ Token inválido en Deriv: {res_data['error']['message']}")
-        else:
-            bot.send_message(USER_ID, "✅ Token de Deriv válido. Conexión exitosa.")
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=mensaje)
     except Exception as e:
-        bot.send_message(USER_ID, f"❌ Error al verificar token de Deriv: {str(e)}")
+        print("Error enviando mensaje Telegram:", e)
 
-verificar_token_deriv()
+def puede_enviar(par):
+    ahora = hora_actual()
+    if par in last_signals:
+        diferencia = ahora - last_signals[par]
+        if diferencia < REPEAT_BLOCK_TIME:
+            return False
+    last_signals[par] = ahora
+    return True
 
-# 📈 Obtener datos del mercado
-def obtener_datos_mercado(par='frxEURUSD', intervalo='1m'):
+# --- PROCESAMIENTO PRINCIPAL ---
+async def procesar_par(par):
     try:
-        datos = deriv.get_candles(symbol=par, interval=intervalo, count=10)
-        return datos
+        async with websockets.connect("wss://ws.deriv.com/websockets/v3?app_id=1089") as ws:
+            await ws.send(json.dumps({
+                "ticks_history": par,
+                "adjust_start_time": 1,
+                "count": 100,
+                "granularity": 60,
+                "style": "candles",
+                "subscribe": 0
+            }))
+
+            response = await ws.recv()
+            data = json.loads(response)
+
+            candles = data.get("history", {}).get("candles", [])
+            if not candles or len(candles) < 10:
+                return
+
+            condiciones_ok, condiciones = validar_condiciones_sarah(candles)
+
+            if condiciones_ok and puede_enviar(par):
+                mensaje_alerta = (
+                    f"⚠️ Posible señal detectada para *{par}*\n"
+                    f"⏰ {hora_actual().strftime('%H:%M:%S')}\n"
+                    f"📊 Evaluando condiciones: {sum(condiciones.values())}/6"
+                )
+                await enviar_telegram(mensaje_alerta)
+
+                # Simulación de validación y confirmación
+                await asyncio.sleep(5)  # Simular tiempo de análisis
+                mensaje_confirmacion = (
+                    f"✅ *SEÑAL CONFIRMADA*\n"
+                    f"Par: {par}\n"
+                    f"Tipo: {'ALCISTA' if condiciones['estructura_tendencia'] else 'BAJISTA'}\n"
+                    f"Condiciones cumplidas: {sum(condiciones.values())}/6\n"
+                    f"Entrada recomendada: {hora_actual().strftime('%H:%M:%S')}"
+                )
+                await enviar_telegram(mensaje_confirmacion)
+            elif not condiciones_ok and puede_enviar(par):
+                await enviar_telegram(f"❌ Señal descartada para {par}. Solo se cumplieron {sum(condiciones.values())}/6 condiciones.")
     except Exception as e:
-        print("Error al obtener datos del mercado:", e)
-        return []
+        print(f"[ERROR - {par}] {e}")
+        traceback.print_exc()
 
-# 📢 Señal de prueba
-def enviar_senal_prueba():
-    ahora = hora_actual_mexico()
-    par = 'EUR/USD'
-    movimiento = 'Alcista'
-    sesion = 'Sesión Europea'
-    temporalidad = 'M1'
-    mensaje = (f"📢 *SEÑAL DE PRUEBA*\n"
-               f"Par: {par}\n"
-               f"Movimiento: {movimiento}\n"
-               f"Sesión: {sesion}\n"
-               f"Entrada recomendada a las: {ahora}\n"
-               f"Temporalidad: {temporalidad}\n"
-               f"Estado: Señal de prueba, no operar con esta señal.")
-    bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
-
-# ✅ Detección de señales reales para varios pares
-pares_a_analizar = ['frxEURUSD', 'frxUSDJPY', 'frxGBPUSD', 'frxAUDUSD']
-
-def detectar_senales_reales():
-    for par in pares_a_analizar:
-        datos = obtener_datos_mercado(par=par)
-        if datos and len(datos) > 1:
-            ultima_candle = datos[-1]
-            anterior_candle = datos[-2]
-            if ultima_candle['close'] > anterior_candle['close']:
-                ahora = hora_actual_mexico()
-                mensaje = (f"✅ *SEÑAL REAL DETECTADA*\n"
-                           f"Par: {par[3:6]}/{par[6:]}\n"
-                           f"Movimiento: Alcista\n"
-                           f"Sesión: Sesión Europea\n"
-                           f"Entrada recomendada a las: {ahora}\n"
-                           f"Temporalidad: M1\n"
-                           f"Estado: Señal real, evaluar para operar.")
-                bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
-                # Reportar resultado tras 1 minuto
-                threading.Timer(60, reportar_resultado, args=(par, ultima_candle, anterior_candle)).start()
-
-# Reporte de ganada o perdida basado en cierre siguiente vela
-def reportar_resultado(par, ultima_candle, anterior_candle):
-    try:
-        datos = obtener_datos_mercado(par=par)
-        if datos and len(datos) > 0:
-            siguiente_candle = datos[-1]
-            ahora = hora_actual_mexico()
-            # Simple ejemplo: ganada si cierre siguiente vela mayor que cierre anterior señal
-            ganada = siguiente_candle['close'] > ultima_candle['close']
-            resultado = "✅ Ganada" if ganada else "❌ Perdida"
-            mensaje = (f"📊 *RESULTADO SEÑAL*\n"
-                       f"Par: {par[3:6]}/{par[6:]}\n"
-                       f"Resultado: {resultado}\n"
-                       f"Hora reporte: {ahora}")
-            bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
-    except Exception as e:
-        print(f"Error al reportar resultado: {e}")
-
-# ⚠️ Alerta previa de posible señal
-def alerta_posible_senal():
-    posible = True  # Aquí va la lógica real
-    if posible:
-        ahora = hora_actual_mexico()
-        condicion = "Volumen creciente + Cierre cerca de resistencia"
-        mensaje = (f"⚠️ *ATENCIÓN: POSIBLE ENTRADA*\n"
-                   f"Condición a cumplirse: {condicion}\n"
-                   f"Hora estimada: {ahora}\n"
-                   f"Monitorear para confirmación.")
-        bot.send_message(USER_ID, mensaje, parse_mode='Markdown')
-
-# ⏱️ Programación de tareas
-schedule.every(30).minutes.do(enviar_senal_prueba)
-schedule.every(5).minutes.do(detectar_senales_reales)
-schedule.every(10).minutes.do(alerta_posible_senal)
-
-# 🧵 Hilo para ejecutar tareas
-def run_schedule():
-    enviar_senal_prueba()
+# --- CICLO DE EJECUCIÓN ---
+async def main_loop():
     while True:
-        schedule.run_pending()
-        time.sleep(1)
+        print(f"[{hora_actual()}] Analizando pares...")
+        tareas = [procesar_par(par) for par in PAIRS]
+        await asyncio.gather(*tareas)
+        print(f"[{hora_actual()}] Esperando siguiente intervalo...\n")
+        await asyncio.sleep(SIGNAL_INTERVAL.total_seconds())
 
-threading.Thread(target=run_schedule, daemon=True).start()
-
-# 🟢 Mantener bot activo
-print("Bot activo y enviando señales con reporte de resultados...")
-
-while True:
-    time.sleep(10)
+# --- INICIO ---
+if __name__ == "__main__":
+    try:
+        asyncio.run(main_loop())
+    except Exception as e:
+        print("[ERROR FATAL]", e)

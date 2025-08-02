@@ -6,6 +6,8 @@ import os
 from datetime import datetime, timedelta
 from telegram import Bot
 import traceback
+import threading
+from aiohttp import web
 
 # --- CONFIGURACIÓN GENERAL ---
 TOKEN_DERIV = os.getenv("DERIV_API_TOKEN")
@@ -25,14 +27,8 @@ REPEAT_BLOCK_TIME = timedelta(hours=1)
 bot = Bot(token=TELEGRAM_TOKEN)
 last_signals = {}
 
-# ... resto igual que antes ...
-
 # --- ESTRATEGIA PERSONALIZADA SARAH ---
 def validar_condiciones_sarah(candle_data):
-    """
-    Simula la validación de las 6 condiciones.
-    Retorna True si se cumplen al menos 4 de 6.
-    """
     condiciones = {
         "estructura_tendencia": True,
         "zona_sr": True,
@@ -93,8 +89,7 @@ async def procesar_par(par):
                 )
                 await enviar_telegram(mensaje_alerta)
 
-                # Simulación de validación y confirmación
-                await asyncio.sleep(5)  # Simular tiempo de análisis
+                await asyncio.sleep(5)
                 mensaje_confirmacion = (
                     f"✅ *SEÑAL CONFIRMADA*\n"
                     f"Par: {par}\n"
@@ -109,7 +104,7 @@ async def procesar_par(par):
         print(f"[ERROR - {par}] {e}")
         traceback.print_exc()
 
-# --- CICLO DE EJECUCIÓN ---
+# --- CICLO DE EJECUCIÓN DEL BOT ---
 async def main_loop():
     while True:
         print(f"[{hora_actual()}] Analizando pares...")
@@ -118,8 +113,22 @@ async def main_loop():
         print(f"[{hora_actual()}] Esperando siguiente intervalo...\n")
         await asyncio.sleep(SIGNAL_INTERVAL.total_seconds())
 
+# --- SERVIDOR AIOHTTP PARA /ping ---
+async def handle_ping(request):
+    return web.Response(text="pong")
+
+def start_ping_server():
+    app = web.Application()
+    app.router.add_get('/ping', handle_ping)
+    web.run_app(app, port=8080)
+
 # --- INICIO ---
 if __name__ == "__main__":
+    # Ejecutar servidor ping en hilo aparte para no bloquear asyncio
+    ping_thread = threading.Thread(target=start_ping_server, daemon=True)
+    ping_thread.start()
+
+    # Ejecutar loop principal del bot
     try:
         asyncio.run(main_loop())
     except Exception as e:

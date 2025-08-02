@@ -1,5 +1,7 @@
 envVars:
-  - key: TELEGRAM_TOKEN
-    value: ""
-  - key: DERIV_TOKEN
-    value: ""
+  - key: DERIV_API_TOKEN
+    value: "xOJbxBMzWZZKWOS"  # tu token real de Deriv
+  - key: TELEGRAM_BOT_TOKEN
+    value: "7905520008:AAG6stSt0gPK33MUyiVZ5yeaSlKYY_CYvJU"  # tu token real de Telegram
+  - key: TELEGRAM_CHAT_ID
+    value: "1506143302"  # tu chat ID real
